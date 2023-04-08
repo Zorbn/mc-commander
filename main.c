@@ -8,25 +8,124 @@
 #include <sys/types.h>
 #include <sys/select.h>
 #include <unistd.h>
+#include <math.h>
 
 #define MAX_MSG_LEN 1024
 #define MAX_INPUT_LEN 1024
 #define MAX_TOKENS 100
 #define MAX_NAME_LEN 17 // 16 characters (defined by Minecraft) + \0
 
+struct CommandRunner {
+	char *command;
+	void (*runner)(char *playerName, char *tokens[], int tokenCount, int pipeWrite);
+};
+
+const struct CommandRunner commandRunners[];
+
+void runHelp(char *playerName, char *tokens[], int tokenCount, int pipeWrite) {
+	char *msg = "say The following commands are available:\n";
+	write(pipeWrite, msg, strlen(msg));
+
+	char *cmdPrefix = "say ";
+	int cmdPrefixLen = strlen(cmdPrefix);
+	char *cmdPostfix = "\n";
+	int cmdPostfixLen = strlen(cmdPostfix);
+
+	for (int i = 0;; ++i) {
+		const struct CommandRunner *commandRunner = &commandRunners[i];
+
+		if (commandRunner->command == NULL) {
+			break;
+		}
+
+		write(pipeWrite, cmdPrefix, cmdPrefixLen);
+		write(pipeWrite, commandRunner->command, strlen(commandRunner->command));
+		write(pipeWrite, cmdPostfix, cmdPostfixLen);
+	}
+}
+
+void runWhereAmI(char *playerName, char *tokens[], int tokenCount, int pipeWrite) {
+	char *msg = "say try pressing f3!\n";
+	write(pipeWrite, msg, strlen(msg));
+}
+
+void runINeedGear(char *playerName, char *tokens[], int tokenCount, int pipeWrite) {
+	int amount = 1;
+	if (tokenCount >= 5) {
+		amount = atoi(tokens[4]);
+	}
+
+	int amountLen = log10(amount) + 1;
+
+	char *msg = "give %s minecraft:diamond_sword %d\n";
+	char *buffer = malloc(strlen(msg) + MAX_NAME_LEN + amountLen);
+	sprintf(buffer, msg, playerName, amount);
+	write(pipeWrite, buffer, strlen(buffer));
+	free(buffer);
+}
+
+const struct CommandRunner commandRunners[] = {
+	{ "help", &runHelp },
+	{ "whereAmI", &runWhereAmI },
+	{ "iNeedGear", &runINeedGear },
+	{ NULL, NULL },
+};
+
 // Check if any input is available on stdin.
 bool hasInput() {
-	int stdinNum = 0;
-	
 	struct timeval timeout;
 	timeout.tv_sec = 0;
 	timeout.tv_usec = 1;
 
 	fd_set fdset;
 	FD_ZERO(&fdset);
-	FD_SET(stdinNum, &fdset);
+	FD_SET(STDIN_FILENO, &fdset);
 
 	return select(1, &fdset, NULL, NULL, &timeout) == 1;
+}
+
+void processLine(char *tokens[], char *parseBuffer, int pipeWrite) {
+	const char *delimiter = " ";
+
+	char playerName[MAX_NAME_LEN];
+
+	char *token = strtok(parseBuffer, delimiter);
+	int tokenI = 0;
+	tokens[tokenI] = token;
+
+	bool hasCommand = false;
+
+	while (token != NULL && tokenI < MAX_TOKENS) {
+		printf("%s ", token);
+		token = strtok(NULL, delimiter);
+		tokens[tokenI] = token;
+
+		if (tokenI == 3 && token[0] == '!') {
+			// Token is the start of a command.
+			// Fetch the player's name.
+			int nameTokenLen = strlen(tokens[2]);
+			strncpy(playerName, &tokens[2][1], nameTokenLen - 2);
+
+			hasCommand = true;
+		}
+
+		++tokenI;
+	}
+
+	if (hasCommand) {
+		for (int i = 0;; ++i) {
+			const struct CommandRunner *commandRunner = &commandRunners[i];
+
+			if (commandRunner->command == NULL) {
+				break;
+			}
+
+			if (strncmp(commandRunner->command, &tokens[3][1], strlen(commandRunner->command)) == 0) {
+				// Found our command.
+				commandRunner->runner(playerName, tokens, tokenI - 1, pipeWrite);
+			}
+		}
+	}
 }
 
 int main(void) {
@@ -83,9 +182,7 @@ int main(void) {
 
 		puts("Created the server process");
 
-		char *delimiter = " ";
 		char *tokens[MAX_TOKENS];
-		char playerName[MAX_NAME_LEN];
 
 		while (true) {
 			if (hasInput()) {
@@ -97,28 +194,7 @@ int main(void) {
 
 			if (read(pipeRead, inBuffer, MAX_MSG_LEN) > 0) {
 				strncpy(parseBuffer, inBuffer, MAX_MSG_LEN);
-
-				char *token = strtok(parseBuffer, delimiter);
-				int tokenI = 0;
-				while (token != NULL && tokenI < MAX_TOKENS) {
-					printf("%s ", token);
-					token = strtok(NULL, delimiter);
-					tokens[tokenI] = token;
-
-					if (tokenI == 3 && token[0] == '!') {
-						// Token is the start of a command.
-						// Fetch the player's name.
-						int nameTokenLen = strlen(tokens[2]);
-						strncpy(playerName, &tokens[2][1], nameTokenLen - 2);
-
-						if (strncmp(&token[1], "help", 4) == 0) {
-							char *msg = "say You asked for help, but that command is currently unavailable, sorry!\n";
-							write(pipeWrite, msg, strlen(msg));
-						}
-					}
-
-					++tokenI;
-				}
+				processLine(tokens, parseBuffer, pipeWrite);
 			}
 		}
 
